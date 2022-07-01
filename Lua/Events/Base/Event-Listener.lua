@@ -2,7 +2,7 @@
 
 ----------------------
 --  EventListener   --
---      v.1.0.3.0   --
+--      v.1.0.3.1   --
 ----------------------
 --          MyPad   --
 ----------------------
@@ -66,21 +66,25 @@
 |                   |--             API             --|
 |----------------------------------------------------------------------
 |
-|        EventListener:create(o)
-|        EventListener:new(o)
-|        EventListener(o)
+|        EventListener.create(o)
+|        EventListener.new(o) {LEGACY}
+|        EventListener(o) {LEGACY}
 |           - Returns a new EventListener object.
 |
 |        EventListener:destroy()
 |           - Destroys a given EventListener object.
 |
-|        EventListener:register(function)
+|        EventListener:register(func) -> bool
 |           - Registers a given function to the
 |             EventListener object.
+|           - Registration may fail due to the following reasons:
+|               - The function may be already registered to the instance
+|               - The function may be blacklisted
+|               - The parameter may not be a function.
 |           - As of 1.0.3.0, <repetitions> field has been removed.
 |
 |        EventListener:unregister(func)
-|        EventListener:deregister(func)
+|        EventListener:deregister(func) {LEGACY}
 |           - Deregisters a function if found in
 |             the list of functions associated with the
 |             EventListener object.
@@ -93,34 +97,66 @@
 |             all of its references to the tables it used.
 |
 |        EventListener:cond_run(cond[, ...])
-|        EventListener:cfire(cond[, ...])
-|        EventListener:conditionalRun(cond[, ...])
-|        EventListener:conditionalExec(cond[, ...])
+|        EventListener:cfire(cond[, ...]) {LEGACY}
+|        EventListener:conditionalRun(cond[, ...]) {LEGACY}
+|        EventListener:conditionalExec(cond[, ...]) {LEGACY}
 |           - As of 1.0.3.0, the condition is evaluated only once.
 |           - Internally calls EventListener:run with
 |             the appended arguments (true, true, <...>).
 |
 |        EventListener:run([, ...])
-|        EventListener:execute([, ...])
-|        EventListener:fire([, ...])
-|        EventListener:exec([, ...])
+|        EventListener:execute([, ...]) {LEGACY}
+|        EventListener:fire([, ...]) {LEGACY}
+|        EventListener:exec([, ...]) {LEGACY}
 |           - If an argument <...> is passed, it will be propagated
 |             to the body of executing functions. This has no
 |             practical limit. (Only restricted by Lua itself)
 |           - Destroys the object if it has been "finalized".
 |
 |        EventListener:getMaxDepth(value)
-|        EventListener:getRecursionCount(value)
-|        EventListener:getRecursionDepth(value)
+|        EventListener:getRecursionCount(value) {LEGACY}
+|        EventListener:getRecursionDepth(value) {LEGACY}
 |           - Returns the maximum amount of times a function can be executed
 |             recursively.
 |
-|        EventListener:setRecursionCount(value)
-|        EventListener:setRecursionDepth(value)
 |        EventListener:setMaxDepth(value)
-|            - Sets the recursion depth to the given value.
-|            - A value of 0 or less will make the object
+|        EventListener:setRecursionCount(value) {LEGACY}
+|        EventListener:setRecursionDepth(value) {LEGACY}
+|           - Sets the recursion depth to the given value.
+|           - A value of 0 or less will make the object
 |              susceptible to infinite loops.
+|
+|       EventListener:getCallbackDepth(func)
+|           - Returns the integer depth of the requested function.
+|           - If the function isn't registered, this returns 0.
+|           - Note that very high values may suggest the presence
+|             of an infinite loop (typically around 3+).
+|
+|       EventListener:getCurDepth()
+|           - Returns the integer depth of the EventListener instance.
+|           - If the current depth is greater than the maximum depth
+|             of the EventListener instance, all registered functions
+|             will not be executed.
+|
+|       EventListener:getCurCallback()
+|           - Returns the currently executing function of the instance.
+|           - Defaults to DoNothing if the instance isn't currently running.
+|
+|       EventListener:getCurCallbackIndex()
+|           - Returns the index of the currently executing function of the instance.
+|           - Defaults to 0 if the instance isn't currently running.
+|       
+|       EventListener:enable(func, flag)
+|           - Increments the "enabled" counter value of the registered
+|             function "func" by 1 if flag is true. Otherwise, decrements
+|             the "enabled" counter value by 1.
+|           - Returns a boolean value which reflects the success of the
+|             operation (with true corresponding to success and vice versa).
+|
+|       EventListener:isEnabled(func)
+|           - If the function is not registered, this returns false.
+|           - If the "enabled" counter value is greater than 0, this
+|             returns true. Returns false otherwise.
 |
  ----------------------------------------------------------------------
 ]]
@@ -131,17 +167,31 @@ do
     -- Appends the current index of the executing function as the first parameter 
     -- among the list of parameters to be used. (Determined at compiletime)
     local _APPEND_INDEX         = false
+    -- This is actually author-exclusive and excludes all copies of
+    -- certain functions if set to false.
+    local _LEGACY_MODE          = false
     EventListener               = {}
 
+    ---@param baseFunc function -> The base function / method.
+    ---@param baseName string -> The name of the base function / method.
+    ---@param targetName string -> The name of the target function / method.
+    local function deprecatedFactory(baseFunc, baseName, targetName)
+        local print = print
+        return function(...)
+            print(targetName .. " has been deprecated. Use " .. baseName .. " instead.")
+            return baseFunc(...)
+        end
+    end
+
     ---@class EventListener
-    ---@field _funcList table -> Stores a list of functions registered to this object.
-    ---@field _funcMap table -> Stores a flag for each registered function.
-    ---@field _funcAbleCounter table -> Stores a counter that determines whether function is to be called when the EventListener runs.
-    ---@field _funcCallCounter table -> Stores a counter that determines the current recursion depth of the called function.
-    ---@field _funcMaxDepth integer -> Holds the maximum amount of times a function can be recursively called. Default is _LOCAL_MAX_RECURSION
-    ---@field _curDepth integer -> The current depth of the EventListener object in a recursive context.
-    ---@field _curFunc function -> The current executing function of the EventListener object.
-    ---@field _curIndex integer -> The current executing function's index of the EventListener object.
+    ---@field private _funcList table -> Stores a list of functions registered to this object.
+    ---@field private _funcMap table -> Stores a flag for each registered function.
+    ---@field private _funcAbleCounter table -> Stores a counter that determines whether function is to be called when the EventListener runs.
+    ---@field private _funcCallCounter table -> Stores a counter that determines the current recursion depth of the called function.
+    ---@field private _funcMaxDepth integer -> Holds the maximum amount of times a function can be recursively called. Default is _LOCAL_MAX_RECURSION
+    ---@field private _curDepth integer -> The current depth of the EventListener object in a recursive context.
+    ---@field private _curFunc function -> The current executing function of the EventListener object.
+    ---@field private _curIndex integer -> The current executing function's index of the EventListener object.
     EventListener.__index       = EventListener
     EventListener.__metatable   = EventListener
     EventListener.__newindex    = 
@@ -163,8 +213,8 @@ do
     local pcall     = pcall
     local DoNothing = DoNothing
 
-    ---Creates a new EventListener instance.
-    ---@param o table : optional
+    ---Creates a new instance.
+    ---@param o table | nil
     ---@return EventListener
     function EventListener.create(o)
         o                   = o or {}
@@ -181,11 +231,12 @@ do
         setmetatable(o, EventListener)
         return o
     end
-    ---Same as EventListener.create.
-    EventListener.new      = EventListener.create
-    ---Same as EventListener.create.
-    EventListener.__call   = EventListener.create
+    if _LEGACY_MODE then
+    EventListener.new      = deprecatedFactory(EventListener.create, "EventListener.create", "EventListener.new")
+    EventListener.__call   = deprecatedFactory(EventListener.create, "EventListener.create", "EventListener:__call")
+    end
 
+    ---Destroys the instance.
     function EventListener:destroy()
         if (self._curDepth > 0) then
             self._wantDestroy   = true
@@ -208,20 +259,26 @@ do
         EventListener.__metatable   = mt
     end
 
+    ---Returns true if the requested function is
+    ---already mapped within the queried instance.
+    ---@param o EventListener - The queried instance
+    ---@param func function - The requested function.
+    ---@return boolean
     local function alreadyRegistered(o, func)
         return o._funcMap[func] ~= nil
     end
 
     ---A list of blacklisted functions -> Cannot be registered as
-    ---callback functions.
+    ---callback functions. If the function returns true, the parameter
+    ---will not be registered. So far, only DoNothing is blacklisted.
     ---@param func function
+    ---@return boolean
     local function blacklistedFunction(func)
         return func == DoNothing
     end
 
-    ---
-    ---@param self EventListener
-    ---@param func function
+    ---@param func function - The function to be registered.
+    ---@return boolean - true if function was successfully registered; false otherwise.
     function EventListener:register(func)
         if (not IsFunction(func)) or
            (alreadyRegistered(self, func) or
@@ -237,6 +294,8 @@ do
         return true
     end
 
+    ---@param func function - The function to be unregistered.
+    ---@return boolean - true if function was successfully unregistered; false otherwise.
     function EventListener:unregister(func)
         if (not IsFunction(func)) or
            (not alreadyRegistered(self, func) or
@@ -255,12 +314,18 @@ do
         end
         return true
     end
-    EventListener.deregister = EventListener.unregister
+    if _LEGACY_MODE then
+    EventListener.deregister = deprecatedFactory(EventListener.unregister, "EventListener:unregister", "EventListener:deregister")
+    end
 
     ---This gets the smallest index higher than i
     ---that has a meaningful entry and maps the
     ---contents of the bigger index to the specified
     ---index i.
+    ---@param i integer - The base index
+    ---@param n integer - The size of the list as an explicit parameter.
+    ---@param iBuffer integer - The buffer value to use for peeking.
+    ---@return integer - Returns the updated value of iBuffer.
     local function forwardSwap(self, i, n, iBuffer)
         while (i + iBuffer <= n) do
             if (self._funcList[i + iBuffer] ~= nil) then
@@ -296,15 +361,14 @@ do
         end
     end
 
-    ---This calls all enabled registered callbacks in the EventListener object
-    ---with the option to use additional parameters.
-    ---@vararg any
+    ---Attempts to call all registered functions in sequential order.
+    ---@vararg any optional parameters that can be any type. Passed down to callback functions.
     function EventListener:run(...)
         local i, n          = 1, #self._funcList
         local checkForDepth = (self._funcMaxDepth > 0)
         local prevF, prevI  = self._curFunc, self._curIndex
         local iBuffer       = 1
-        self._curDepth = self._curDepth + 1
+        self._curDepth      = self._curDepth + 1
         while (i <= n) and (not self._wantDestroy) do
         while (true) do
             -- If the current index holds a recently deregistered function,
@@ -354,14 +418,15 @@ do
             self._curIndex = 0
         end
     end
-    EventListener.exec      = EventListener.run
-    EventListener.fire      = EventListener.run
-    EventListener.execute   = EventListener.run
+    if _LEGACY_MODE then
+    EventListener.exec      = deprecatedFactory(EventListener.run, "EventListener:run", "EventListener:exec")
+    EventListener.fire      = deprecatedFactory(EventListener.run, "EventListener:run", "EventListener:fire")
+    EventListener.execute   = deprecatedFactory(EventListener.run, "EventListener:run", "EventListener:execute")
+    end
 
-    ---This first evaluates the condition parameter if it is a function,
-    ---or checks whether the translated boolean value is true.
-    ---Terminates early when the evaluated result is false.
-    ---@param cond function or boolean
+    ---Evaluates the condition once before falling back to EventListener:run()
+    ---@param cond function | boolean
+    ---@vararg any optional parameters that can be any type. Passed down to callback functions.
     function EventListener:cond_run(cond, ...)
         if ((IsFunction(cond) and (not cond())) or 
         ((not IsFunction(cond)) and (not cond))) then
@@ -369,24 +434,35 @@ do
         end
         self:run(...)
     end
-    EventListener.cfire             = EventListener.cond_run
-    EventListener.conditionalRun    = EventListener.cond_run
-    EventListener.conditionalExec   = EventListener.cond_run
+    if _LEGACY_MODE then
+        EventListener.cfire             = deprecatedFactory(EventListener.cond_run, "EventListener:cond_run", "EventListener:cfire")
+        EventListener.conditionalRun    = deprecatedFactory(EventListener.cond_run, "EventListener:cond_run", "EventListener:conditionalRun")
+        EventListener.conditionalExec   = deprecatedFactory(EventListener.cond_run, "EventListener:cond_run", "EventListener:conditionalExec")
+    end
 
-    ---Returns the maximum amount of times a function can be executed.
+    ---@param self EventListener - The EventListener object.
+    ---@return integer - The max depth for a registered function within this instance.
     function EventListener:getMaxDepth()
         return self._funcMaxDepth
     end
-    EventListener.getRecursionCount = EventListener.getMaxDepth
-    EventListener.getRecursionDepth = EventListener.getMaxDepth
+    if _LEGACY_MODE then
+    EventListener.getRecursionCount = deprecatedFactory(EventListener.getMaxDepth, "EventListener:getMaxDepth", "EventListener:getRecursionCount")
+    EventListener.getRecursionDepth = deprecatedFactory(EventListener.getMaxDepth, "EventListener:getMaxDepth", "EventListener:getRecursionDepth")
+    end
 
-    ---@param i integer
+    ---@param self EventListener - The EventListener object.
+    ---@param i integer - The updated max depth value.
     function EventListener:setMaxDepth(i)
         self._funcMaxDepth = i
     end
-    EventListener.setRecursionCount = EventListener.setMaxDepth
-    EventListener.setRecursionDepth = EventListener.setMaxDepth
+    if _LEGACY_MODE then
+    EventListener.setRecursionCount = deprecatedFactory(EventListener.setMaxDepth, "EventListener:setMaxDepth", "EventListener:setRecursionCount")
+    EventListener.setRecursionDepth = deprecatedFactory(EventListener.setMaxDepth, "EventListener:setMaxDepth", "EventListener:setRecursionDepth")
+    end
 
+    ---@param self EventListener - The EventListener object.
+    ---@param func function - The function to be peeked.
+    ---@return number - If not registered, defaults to 0. Returns the current depth of the function.
     function EventListener:getCallbackDepth(func)
         func = func or self._curFunc or DoNothing
         if (not alreadyRegistered(self, func)) then
@@ -395,15 +471,29 @@ do
         local i = self._funcMap[func]
         return self._funcCallCounter[i]
     end
+
+    ---@param self EventListener - The EventListener object.
+    ---@return integer - The current depth of the instance.
     function EventListener:getCurDepth()
         return self._curDepth or 0
     end
+
+    ---@param self EventListener - The EventListener object.
+    ---@return function - The current callback function of the running instance.
     function EventListener:getCurCallback()
         return self._curFunc or DoNothing
     end
+
+    ---@param self EventListener - The EventListener object.
+    ---@return integer - The index of the current callback function of the running instance.
     function EventListener:getCurCallbackIndex()
         return self._curIndex or 0
     end
+
+    ---@param self EventListener - The EventListener object.
+    ---@param func function - The affected function
+    ---@param flag boolean - The flag value.
+    ---@return boolean - Defaults to false if function isn't registered. Returns true otherwise.
     function EventListener:enable(func, flag)
         if (not alreadyRegistered(self, func)) then
             return false
@@ -413,6 +503,10 @@ do
         self._funcAbleCounter[i] = self._funcAbleCounter[i] + j
         return true
     end
+
+    ---@param self EventListener - The EventListener object.
+    ---@param func function - The affected function
+    ---@return boolean - Defaults to false if function isn't registered. Returns true if counter value for function is greater than 0.
     function EventListener:isEnabled(func)
         if (not alreadyRegistered(self, func)) then
             return false
